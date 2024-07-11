@@ -15,22 +15,7 @@ import time
 
 sys.path.append("Silent-Face-Anti-Spoofing")
 from test1 import test  # from test1.py in the Silent-Face-Anti-Spoofing folder
-
-
 # gr.themes.builder()
-
-
-# def load_db():
-#     db = {}
-#     filenames = os.listdir(db_dir)
-#     for filename in filenames:
-#         path_ = os.path.join(db_dir, filename)
-#         with open(path_, 'rb') as file:
-#             embeddings = pickle.load(file)
-#             db[filename[:-7]] = embeddings
-#     return db
-#
-# db = load_db()
 
 
 uri = "mongodb+srv://longmw2001:g2XoE2TTYOKjGVFg@facerecognition.hwcxpnq.mongodb.net/?retryWrites=true&w=majority&appName=FaceRecognition"
