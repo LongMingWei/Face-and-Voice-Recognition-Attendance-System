@@ -1,3 +1,4 @@
+from pveagle import EagleProfile
 from pymongo.mongo_client import MongoClient
 from pymongo.server_api import ServerApi
 import cv2
@@ -6,6 +7,8 @@ import face_recognition
 from PIL import Image
 import gradio as gr
 from deepface import DeepFace
+import pveagle
+from pvrecorder import PvRecorder
 import sys
 import time
 
@@ -25,66 +28,138 @@ def load_embeddings():
     global user_embeddings
     user_embeddings = {}
     for user in collection.find():
+        stats = {}
         username = user['username']
         embedding = np.array(user['embedding'])
-        user_embeddings[username] = embedding
+        voice_profile = user.get('voice_profile', None)
+        stats['face'] = embedding
+        stats['speaker'] = voice_profile
+        user_embeddings[username] = stats
         print(username)
+
 
 load_embeddings()
 
+access_key = "/cxYMcgSAw1EMF0XPQT2tXUKHoHqXSCvByLxTjtmMjHfwgkN/ypnag=="
+
+
+state = 1
+usersname=""
+
 def recognize_user(image):
-    img = np.array(image)
-    img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+    global state, usersname
+    if state == 1:
+        img = np.array(image)
+        img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
 
-    # Anti-Spoofing
-    label = test(
-        image=img_rgb,
-        model_dir='./Silent-Face-Anti-Spoofing/resources/anti_spoof_models',
-        device_id=0
-    )
+        # Anti-Spoofing
+        label = test(
+            image=img_rgb,
+            model_dir='./Silent-Face-Anti-Spoofing/resources/anti_spoof_models',
+            device_id=0
+        )
 
-    if label == 1:
-        if len(face_recognition.face_encodings(img_rgb)) == 0:
-            return "No person detected"
+        if label == 1:
+            if len(face_recognition.face_encodings(img_rgb)) == 0:
+                return "No person detected"
+            else:
+                name = recognize(img_rgb)
+                if name in ['unknown_person', 'no_persons_found']:
+                    return "Unknown user. Please register if you have not or try again."
+                else:
+                    state = 2
+                    result = DeepFace.analyze(img_rgb, actions=['emotion'], enforce_detection=False)
+                    mood = result[0]['dominant_emotion']
+                    usersname = name
+                    if name.endswith('_0001') or name.endswith('_0002') or name.endswith('_0003'):
+                        name = name[:-5]
+                    return f"Hello {name}, you look {mood} today! Verify your voice to enter."
         else:
             name = recognize(img_rgb)
             if name in ['unknown_person', 'no_persons_found']:
-                return "Unknown user. Please register if you have not or try again."
+                return "Hello unknown fake NPC. You shall not pass!"
             else:
-                result = DeepFace.analyze(img_rgb, actions=['emotion'], enforce_detection=False)
-                mood = result[0]['dominant_emotion']
                 if name.endswith('_0001') or name.endswith('_0002') or name.endswith('_0003'):
                     name = name[:-5]
-                return f"Access granted. Welcome, {name}, you look {mood} today!"
+                return f"You think you are {name}? You shall not pass!"
     else:
-        name = recognize(img_rgb)
-        if name in ['unknown_person', 'no_persons_found']:
-            return "Hello unknown fake NPC. You shall not pass!"
+        state = 1
+        speaker_bytes = user_embeddings[usersname]['speaker']
+        if not speaker_bytes:
+            return "This profile has no voice registered. (Celebrity)"
+        speaker_profile = EagleProfile.from_bytes(speaker_bytes)
+        eagle = pveagle.create_recognizer(access_key=access_key, speaker_profiles=[speaker_profile])
+        recognizer_recorder = PvRecorder(device_index=-1, frame_length=eagle.frame_length)
+        recognizer_recorder.start()
+        sum = 0
+        for i in range(30):
+            audio_frame = recognizer_recorder.read()
+            sum += eagle.process(audio_frame)[0]
+        recognizer_recorder.stop()
+        eagle.delete()
+        recognizer_recorder.delete()
+
+        score = sum/30
+        if score >= 0.6:
+            return "Access granted. Have a great day!"
         else:
-            if name.endswith('_0001') or name.endswith('_0002') or name.endswith('_0003'):
-                name = name[:-5]
-            return f"You think you are {name}? You shall not pass!"
+            return "Voice does not match. Try again."
+
+
+rstate = 1
+rname = ""
+rembed = None
+
 
 def register_user(name, image):
-    if not name:
-        return "Enter new user name."
+    global rstate, rname, rembed
+    if rstate == 1:
+        if not name:
+            return "Name field empty."
 
-    img = np.array(image)
-    embeddings = face_recognition.face_encodings(img)
-    if len(embeddings) == 0:
-        return "No face detected in the image."
-    embedding = embeddings[0].tolist()  # Convert to list for MongoDB storage
-    document = {
-        'username': name,
-        'embedding': embedding
-    }
-    collection.insert_one(document)
-    user_embeddings[name] = embeddings[0]  # Add new data entry to memory
-    return f'User {name} registered successfully!'
+        img = np.array(image)
+        embeddings = face_recognition.face_encodings(img)
+        if len(embeddings) == 0:
+            return "No face detected in the image."
+        else:
+            if name in user_embeddings:
+                return "Name already taken."
+            rstate = 2
+            rname = name
+            embedding = embeddings[0]
+            rembed = embedding
+            return "Press 'Submit' again, then speak into the microphone until voice calibration is complete."
+    else:
+        eagle_profiler = pveagle.create_profiler(access_key=access_key)
+        recorder = PvRecorder(device_index=-1, frame_length=eagle_profiler.min_enroll_samples)
+        recorder.start()
+        enroll_percentage = 0.0
+        while enroll_percentage < 100.0:
+            audio_frame = recorder.read()
+            enroll_percentage, feedback = eagle_profiler.enroll(audio_frame)
+            print(enroll_percentage)
+        recorder.stop()
+
+        speaker_profile = eagle_profiler.export()
+        document = {
+            'username': rname,
+            'embedding': rembed.tolist(),  # Convert to list for MongoDB storage,
+            'voice_profile': speaker_profile.to_bytes()
+        }
+        collection.insert_one(document)
+        user_embeddings[rname] = {}  # Add new data entry to memory
+        user_embeddings[rname]['face'] = rembed
+        user_embeddings[rname]['speaker'] = speaker_profile.to_bytes()
+
+        rstate = 1
+        eagle_profiler.delete()
+        recorder.delete()
+        return f"User {rname} registered successfully!"
+
 
 def delete_user(name):
     if not name:
-        return "Enter user name to delete."
+        return "Name field empty."
 
     result = collection.delete_one({'username': name})
     if result.deleted_count > 0:
@@ -92,6 +167,7 @@ def delete_user(name):
         return f'User {name} deleted successfully!'
     else:
         return f'User {name} not found!'
+
 
 def recognize(img):
     embeddings_unknown = face_recognition.face_encodings(img)
@@ -105,7 +181,8 @@ def recognize(img):
     mini = threshold
     min_dis_id = 'unknown_person'
     for username, embedding in user_embeddings.items():
-        distance = face_recognition.face_distance([embedding], embeddings_unknown)[0]
+        face_embedding = embedding['face']
+        distance = face_recognition.face_distance([face_embedding], embeddings_unknown)[0]
         if distance < mini:
             mini = distance
             min_dis_id = username
@@ -124,6 +201,7 @@ iface_recognize = gr.Interface(
     inputs=[gr.Image(source="webcam", streaming=True)],
     outputs=[gr.HTML()],
     live=True,
+    every=1,
     title="Face Recognition Attendance System",
     allow_flagging='never',
     clear_btn=None
@@ -131,7 +209,7 @@ iface_recognize = gr.Interface(
 
 iface_register = gr.Interface(
     fn=register_user,
-    inputs=[gr.Textbox(show_label=False), gr.Image(source="webcam", streaming=True)],
+    inputs=[gr.Textbox(label="Enter new user name."), gr.Image(source="webcam", streaming=True)],
     outputs=[gr.HTML()],
     title="Register New User",
     live=False,
@@ -141,7 +219,7 @@ iface_register = gr.Interface(
 
 iface_delete = gr.Interface(
     fn=delete_user,
-    inputs=[gr.Textbox(show_label=False)],
+    inputs=[gr.Textbox(label="Enter user name to delete")],
     outputs=[gr.HTML()],
     title="Delete User",
     live=False,

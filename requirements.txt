@@ -15,3 +15,5 @@ tf_keras
 streamlit~=1.36.0
 gradio~=3.50.2
 pymongo~=4.8.0
+pveagle~=1.0.1
+pvrecorder~=1.2.2
