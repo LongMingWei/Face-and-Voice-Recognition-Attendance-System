@@ -32,6 +32,8 @@ def load_embeddings():
         username = user['username']
         embedding = np.array(user['embedding'])
         voice_profile = user.get('voice_profile', None)
+        if voice_profile:
+            voice_profile = EagleProfile.from_bytes(voice_profile)
         stats['face'] = embedding
         stats['speaker'] = voice_profile
         user_embeddings[username] = stats
@@ -84,22 +86,21 @@ def recognize_user(image):
                 return f"You think you are {name}? You shall not pass!"
     else:
         state = 1
-        speaker_bytes = user_embeddings[usersname]['speaker']
-        if not speaker_bytes:
+        speaker_profile = user_embeddings[usersname]['speaker']
+        if not speaker_profile:
             return "This profile has no voice registered. (Celebrity)"
-        speaker_profile = EagleProfile.from_bytes(speaker_bytes)
         eagle = pveagle.create_recognizer(access_key=access_key, speaker_profiles=[speaker_profile])
         recognizer_recorder = PvRecorder(device_index=-1, frame_length=eagle.frame_length)
         recognizer_recorder.start()
         sum = 0
-        for i in range(30):
+        for i in range(50):
             audio_frame = recognizer_recorder.read()
             sum += eagle.process(audio_frame)[0]
         recognizer_recorder.stop()
         eagle.delete()
         recognizer_recorder.delete()
 
-        score = sum/30
+        score = sum/50
         if score >= 0.6:
             return "Access granted. Have a great day!"
         else:
