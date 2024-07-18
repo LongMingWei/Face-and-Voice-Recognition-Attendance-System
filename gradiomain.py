@@ -9,6 +9,8 @@ import gradio as gr
 from deepface import DeepFace
 import pveagle
 from pvrecorder import PvRecorder
+import struct
+import wave
 import sys
 import time
 
@@ -49,6 +51,7 @@ state = 1
 usersname=""
 
 def recognize_user(image):
+    time.sleep(1)
     global state, usersname
     if state == 1:
         img = np.array(image)
@@ -93,23 +96,41 @@ def recognize_user(image):
         recognizer_recorder = PvRecorder(device_index=-1, frame_length=eagle.frame_length)
         recognizer_recorder.start()
         sum = 0
-        for i in range(50):
-            audio_frame = recognizer_recorder.read()
-            sum += eagle.process(audio_frame)[0]
+        duration = 80
+        buffer = 20
+        ticks = 0
+        valid = (duration-buffer)*0.25
+        for i in range(duration):
+            if i >= buffer:
+                audio_frame = recognizer_recorder.read()
+                score = eagle.process(audio_frame)[0]
+                if score > 0.1:
+                    sum += score
+                    ticks += 1
+                print(score)
         recognizer_recorder.stop()
         eagle.delete()
         recognizer_recorder.delete()
 
-        score = sum/50
-        if score >= 0.6:
+        if ticks == 0:
+            total_score = 0
+        else:
+            total_score = sum/ticks
+        print("Score:", total_score)
+        print("Ticks:", ticks)
+        if total_score >= 0.8 and ticks >= valid:
             return "Access granted. Have a great day!"
         else:
             return "Voice does not match. Try again."
 
 
-def register_user(name, image, voice):
+def register_user(name, voice, image):
     if not name:
         return "Name field empty."
+    elif name in user_embeddings:
+        return "Name already taken."
+    if not voice:
+        return "Voice profile missing."
 
     img = np.array(image)
     img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
@@ -124,24 +145,19 @@ def register_user(name, image, voice):
 
     if len(embeddings) == 0:
         return "No face detected in the image."
-    elif name in user_embeddings:
-        return "Name already taken."
     elif label != 1:
         return "Face is fake. Registration denied."
 
     embedding = embeddings[0]
 
     eagle_profiler = pveagle.create_profiler(access_key=access_key)
-    eagle_profiler.enroll(voice)
-    # recorder = PvRecorder(device_index=-1, frame_length=eagle_profiler.min_enroll_samples)
-    # recorder.start()
-    # enroll_percentage = 0.0
-    # while enroll_percentage < 100.0:
-    #     audio_frame = recorder.read()
-    #     enroll_percentage, feedback = eagle_profiler.enroll(audio_frame)
-    #     print(enroll_percentage)
-    # recorder.stop()
-    speaker_profile = eagle_profiler.export()
+    audio = read_file(voice, eagle_profiler.sample_rate)
+    enroll_percentage, feedback = eagle_profiler.enroll(audio)
+    if enroll_percentage < 100.0:
+        return "Unable to register voice profile. Speak for a longer period of time."
+    else:
+        speaker_profile = eagle_profiler.export()
+
     document = {
         'username': name,
         'embedding': embedding.tolist(),  # Convert to list for MongoDB storage,
@@ -150,10 +166,10 @@ def register_user(name, image, voice):
     collection.insert_one(document)
     user_embeddings[name] = {}  # Add new data entry to memory
     user_embeddings[name]['face'] = embedding
-    user_embeddings[name]['speaker'] = speaker_profile.to_bytes()
+    user_embeddings[name]['speaker'] = speaker_profile
 
     eagle_profiler.delete()
-    # recorder.delete()
+
     return f"User {name} registered successfully!"
 
 
@@ -189,6 +205,37 @@ def recognize(img):
             match = True
     return min_dis_id if match else 'unknown_person'
 
+def read_file(file_name, sample_rate):
+    rate_match = True
+
+    with wave.open(file_name, mode="rb") as wav_file:
+        channels = wav_file.getnchannels()
+        sample_width = wav_file.getsampwidth()
+        num_frames = wav_file.getnframes()
+
+        params = wav_file.getparams()
+        params = list(params)
+
+        if wav_file.getframerate() != sample_rate:
+            params[3] = sample_rate
+            print(params)
+            print("Audio file should have a sample rate of %d. got %d" % (sample_rate, wav_file.getframerate()))
+        if sample_width != 2:
+            raise ValueError("Audio file should be 16-bit. got %d" % sample_width)
+        if channels == 2:
+            print("Eagle processes single-channel audio but stereo file is provided. Processing left channel only.")
+
+    if not rate_match:
+        with wave.open(file_name, mode="wb") as wav_file:
+            wav_file.setparams(params)
+
+    with wave.open(file_name, mode="rb") as wav_file:
+        samples = wav_file.readframes(num_frames)
+
+    frames = struct.unpack('h' * num_frames * channels, samples)
+
+    return frames[::channels]
+
 # Frontend interface
 theme = gr.themes.Soft(
     primary_hue="slate",
@@ -198,10 +245,9 @@ theme = gr.themes.Soft(
 
 iface_recognize = gr.Interface(
     fn=recognize_user,
-    inputs=[gr.Image(source="webcam", streaming=True)],
+    inputs=[gr.Image(label="Show your whole face to the camera", source="webcam", streaming=True)],
     outputs=[gr.HTML()],
     live=True,
-    every=1,
     title="Face Recognition Attendance System",
     allow_flagging='never',
     clear_btn=None
@@ -209,9 +255,9 @@ iface_recognize = gr.Interface(
 
 iface_register = gr.Interface(
     fn=register_user,
-    inputs=[gr.Textbox(label="Enter new user name."),
-            gr.Image(label="Ensure your face is properly shown.", source="webcam", streaming=True),
-            gr.Audio(label="Record your voice.", source="microphone", format="wav")],
+    inputs=[gr.Textbox(label="Enter new user name"),
+            gr.Audio(label="Record your voice", source="microphone", format="wav", type="filepath"),
+            gr.Image(label="Ensure your face is properly shown", source="webcam", streaming=True)],
     outputs=[gr.HTML()],
     title="Register New User",
     live=False,
@@ -231,9 +277,11 @@ iface_delete = gr.Interface(
 
 custom_css = """
     footer {display: none !important;}
-    label.float {display: none !important;}
     div.stretch button.secondary {display: none !important;}
     .panel .pending {opacity: 1 !important;}
+    .unequal-height {display: block !important;}
+    .image-container {width: 50% !important; height: 50% !important;}
+    .prose {font-size: 3rem !important;}
 """
 
 iface = gr.TabbedInterface([iface_recognize, iface_register, iface_delete], ["Recognize User", "Register User", "Delete User"],
