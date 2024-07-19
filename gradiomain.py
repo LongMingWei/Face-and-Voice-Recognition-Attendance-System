@@ -124,7 +124,7 @@ def recognize_user(image):
             return "Voice does not match. Try again."
 
 
-def register_user(name, voice, image):
+def register_user(image, name, voice):
     if not name:
         return "Name field empty."
     elif name in user_embeddings:
@@ -255,9 +255,9 @@ iface_recognize = gr.Interface(
 
 iface_register = gr.Interface(
     fn=register_user,
-    inputs=[gr.Textbox(label="Enter new user name"),
-            gr.Audio(label="Record your voice", source="microphone", format="wav", type="filepath"),
-            gr.Image(label="Ensure your face is properly shown", source="webcam", streaming=True)],
+    inputs=[gr.Image(label="Ensure your face is properly shown and details are entered below", source="webcam", streaming=True),
+            gr.Textbox(label="Enter new user name"),
+            gr.Audio(label="Record your voice", source="microphone", format="wav", type="filepath")],
     outputs=[gr.HTML()],
     title="Register New User",
     live=False,
@@ -279,9 +279,9 @@ custom_css = """
     footer {display: none !important;}
     div.stretch button.secondary {display: none !important;}
     .panel .pending {opacity: 1 !important;}
-    .unequal-height {display: block !important;}
-    .image-container {width: 50% !important; height: 50% !important;}
+    .tab-nav button {font-size: 1.5rem !important;}
     .prose {font-size: 3rem !important;}
+    .gap.panel {border: none !important;}
 """
 
 iface = gr.TabbedInterface([iface_recognize, iface_register, iface_delete], ["Recognize User", "Register User", "Delete User"],
