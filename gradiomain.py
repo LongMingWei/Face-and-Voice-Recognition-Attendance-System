@@ -8,17 +8,18 @@ from PIL import Image
 import gradio as gr
 from deepface import DeepFace
 import pveagle
-from pvrecorder import PvRecorder
+from scipy.signal import resample
 import struct
 import wave
 import sys
+import os
 import time
 
 sys.path.append("Silent-Face-Anti-Spoofing")
 from test1 import test  # from test1.py in the Silent-Face-Anti-Spoofing folder
 # gr.themes.builder()
 
-uri = "mongodb+srv://longmw2001:g2XoE2TTYOKjGVFg@facerecognition.hwcxpnq.mongodb.net/?retryWrites=true&w=majority&appName=FaceRecognition"
+uri = os.getenv('MONGODBPASSCODE')
 client = MongoClient(uri, server_api=ServerApi('1'))
 collection = client['users']['faces']
 collection.create_index("username", unique=True)
@@ -44,13 +45,13 @@ def load_embeddings():
 
 load_embeddings()
 
-access_key = "/cxYMcgSAw1EMF0XPQT2tXUKHoHqXSCvByLxTjtmMjHfwgkN/ypnag=="
+access_key = os.getenv('PVRECORDERACCESSKEY')
 
 
 state = 1
 usersname=""
 
-def recognize_user(image):
+def recognize_user(image, voice):
     time.sleep(1)
     global state, usersname
     if state == 1:
@@ -72,13 +73,19 @@ def recognize_user(image):
             if name in ['unknown_person', 'no_persons_found']:
                 return "Unknown user. Please register if you have not or try again."
             else:
-                state = 2
                 result = DeepFace.analyze(img_rgb, actions=['emotion'], enforce_detection=False)
                 mood = result[0]['dominant_emotion']
                 usersname = name
                 if name.endswith('_0001') or name.endswith('_0002') or name.endswith('_0003'):
                     name = name[:-5]
-                return f"Hello {name}, you look {mood} today! Verify your voice to enter."
+                verification = f"Hello {name}, you look {mood} today! "
+                speaker_profile = user_embeddings[usersname]['speaker']
+                if not speaker_profile:
+                    verification += "This profile has no voice registered. (Celebrity)"
+                else:
+                    verification += "Verify your voice: Press 'Record from microphone' and SPEAK now."
+                    state = 2
+                return verification
         else:
             name = recognize(img_rgb)
             if name in ['unknown_person', 'no_persons_found']:
@@ -90,38 +97,66 @@ def recognize_user(image):
     else:
         state = 1
         speaker_profile = user_embeddings[usersname]['speaker']
-        if not speaker_profile:
-            return "This profile has no voice registered. (Celebrity)"
+        if not voice:
+            return "No voice input provided. Please try again."
+            
         eagle = pveagle.create_recognizer(access_key=access_key, speaker_profiles=[speaker_profile])
-        recognizer_recorder = PvRecorder(device_index=-1, frame_length=eagle.frame_length)
-        recognizer_recorder.start()
-        sum = 0
-        duration = 80
-        buffer = 20
+
+        mismatch = False
+        with wave.open(voice, mode="rb") as wav_file:
+            channels = wav_file.getnchannels()
+            sample_width = wav_file.getsampwidth()
+            num_frames = wav_file.getnframes()
+            input_sample_rate = wav_file.getframerate()
+
+            if sample_width != 2:
+                raise ValueError(f"Incorrect sample width: expected 16-bit, got {sample_width * 8}-bit") 
+            if input_sample_rate != eagle.sample_rate:
+                mismatch = True
+                num_frames = int(num_frames * eagle.sample_rate / input_sample_rate)
+
+        if mismatch:
+            with wave.open(voice, mode="rb") as wav_file:
+                frames = wav_file.readframes(num_frames)
+                audio_data = struct.unpack('h' * num_frames * channels, frames)
+                audio_data = np.array(audio_data[::channels], dtype=np.float32)  
+                audio_data = resample(audio_data, num_frames)  
+        else:
+            with wave.open(voice, mode="rb") as wav_file:
+                frames = wav_file.readframes(num_frames)
+                audio_data = struct.unpack('h' * num_frames * channels, frames)
+                audio_data = np.array(audio_data[::channels], dtype=np.float32)  
+
+        sum_scores = 0
+        duration = len(audio_data) // eagle.frame_length
+        buffer = 100
         ticks = 0
-        valid = (duration-buffer)*0.25
-        for i in range(duration):
-            if i >= buffer:
-                audio_frame = recognizer_recorder.read()
-                score = eagle.process(audio_frame)[0]
-                if score > 0.1:
-                    sum += score
-                    ticks += 1
-                print(score)
-        recognizer_recorder.stop()
-        eagle.delete()
-        recognizer_recorder.delete()
+        valid = (duration - buffer) * 0.25
+
+        for i in range(buffer, duration):
+            start_idx = i * eagle.frame_length
+            end_idx = (i + 1) * eagle.frame_length
+            frame = audio_data[start_idx:end_idx].astype(np.int32)
+            if len(frame) < eagle.frame_length:
+                break  
+            score = eagle.process(frame)[0]
+            if score > 0.2:
+                sum_scores += score
+                ticks += 1
+            print(score)
+        
+        eagle.delete()        
 
         if ticks == 0:
             total_score = 0
         else:
-            total_score = sum/ticks
+            total_score = sum_scores/ticks
         print("Score:", total_score)
         print("Ticks:", ticks)
-        if total_score >= 0.8 and ticks >= valid:
-            return "Access granted. Have a great day!"
+        if total_score >= 0.6 and ticks >= valid:
+            return "Access granted. Have a great day! (Press 'Stop recording')"
         else:
-            return "Voice does not match. Try again."
+            return "Voice does not match. Try again. (Press 'Stop recording')"
 
 
 def register_user(image, name, voice):
@@ -245,7 +280,8 @@ theme = gr.themes.Soft(
 
 iface_recognize = gr.Interface(
     fn=recognize_user,
-    inputs=[gr.Image(label="Show your whole face to the camera", source="webcam", streaming=True)],
+    inputs=[gr.Image(label="Show your whole face to the camera", source="webcam", streaming=True),
+            gr.Audio(show_label=False, source="microphone", streaming=True, format="wav", type="filepath")],
     outputs=[gr.HTML()],
     live=True,
     title="Face Recognition Attendance System",
@@ -257,7 +293,7 @@ iface_register = gr.Interface(
     fn=register_user,
     inputs=[gr.Image(label="Ensure your face is properly shown and details are entered below", source="webcam", streaming=True),
             gr.Textbox(label="Enter new user name"),
-            gr.Audio(label="Record your voice", source="microphone", format="wav", type="filepath")],
+            gr.Audio(label="Record your voice (15-20 seconds recommended)", source="microphone", format="wav", type="filepath", show_edit_button=False, show_download_button=False)],
     outputs=[gr.HTML()],
     title="Register New User",
     live=False,
@@ -284,7 +320,7 @@ custom_css = """
     .gap.panel {border: none !important;}
 """
 
-iface = gr.TabbedInterface([iface_recognize, iface_register, iface_delete], ["Recognize User", "Register User", "Delete User"],
+iface = gr.TabbedInterface([iface_register, iface_recognize, iface_delete], ["Register User", "Verify User", "Delete User"],
                            css=custom_css, theme=theme)
 
 if __name__ == "__main__":
