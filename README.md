@@ -10,4 +10,5 @@
 
 # How it works
 
-![Program Flowchart 2](https://github.com/user-attachments/assets/baf6ec7a-9743-4657-9e2e-401bd0310ae1)
+![Program Flowchart](https://github.com/user-attachments/assets/6d429090-b078-4dee-97b7-f1f9fa7760a6)
+
